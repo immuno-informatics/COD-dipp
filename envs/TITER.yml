@@ -1,0 +1,11 @@
+name: titer
+channels:
+    - conda-forge
+dependencies:
+    - keras=2.1.4
+    - scikit-learn
+    - python=2.7
+    - mkl-service
+    - pandas
+    - pip:
+        - theano

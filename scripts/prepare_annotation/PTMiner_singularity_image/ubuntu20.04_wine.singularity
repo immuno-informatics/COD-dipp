@@ -1,0 +1,19 @@
+Bootstrap: docker
+From: ubuntu:20.04
+
+%setup
+    mkdir -p /APPS
+
+%files
+    init /init
+    PTMiner /PTMiner
+    PTMiner1.1.2/ APPS/
+
+%post
+	chmod 777 -R /APPS
+	apt update
+	apt -y install software-properties-common
+	dpkg --add-architecture i386
+	apt update
+	apt install -y wine64 wine32
+	apt-get install -y winetricks

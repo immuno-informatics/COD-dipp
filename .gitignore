@@ -1,0 +1,15 @@
+# snakemake
+.snakemake/
+/snakemake-dry-run.log
+/snakemake.log
+/reports/
+/dag.dot
+*.done
+.Rhistory
+.coverage
+
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+build/

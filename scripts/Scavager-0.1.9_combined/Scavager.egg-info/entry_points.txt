@@ -1,0 +1,5 @@
+[console_scripts]
+scav2diffacto = scavager.scav2diffacto:run
+scav2nsaf = scavager.scav2nsaf:run
+scavager = scavager.search:run
+

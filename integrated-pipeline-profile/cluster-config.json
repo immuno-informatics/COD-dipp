@@ -1,0 +1,96 @@
+{
+    "__default__":
+    {
+        "account": "AccountID",
+        "cpus" : 1,
+        "memory": 5000,
+        "time": "00:30:00",
+        "partition": "PartitionID",
+        "name": "test_study.sample_test.{rule}",
+        "nodes": 1,
+        "ntasks": 1,
+        "gres": 0
+    },
+    "all":
+    {
+        "time": "00:01:00",
+        "cpus": 1,
+        "memory": 1
+    },
+    "frs_msgfplus":
+    {
+        "time": "10:00:00",
+        "memory": 31000,
+        "cpus": 10
+    },
+    "frs_msfragger":
+    {
+        "time": "08:00:00",
+        "cpus": 24,
+        "memory": 120000
+    },
+    "PTMiner_msfragger":
+    {
+        "time": "01:00:00",
+        "cpus": 1,
+        "memory": "5000"
+    },
+    "scavager_msgfplus":
+    {
+        "time": "04:00:00",
+        "cpus": 12,
+        "memory": "12000"
+    },
+    "denovo":
+    {
+     "time": "24:00:00",
+     "cpus" :24,
+     "memory": 120000
+    },
+    "denovo_GPU":
+    {
+     "account": "iccvsdeep",
+     "time": "60:00:00",
+     "cpus" : 12,
+     "memory": 60000,
+     "partition": "plgrid-gpu",
+     "gres": "gpu:1"
+    },
+    "proBAMconvert":
+    {
+        "time": "10:00:00",
+        "cpus": 1,
+        "memory": "30000"
+    },
+     "data_exploration":
+    {
+        "time": "01:00:00",
+        "cpus": 1,
+        "memory": "10000"
+    },
+     "denovo_annotation":
+    {
+        "time": "24:00:00",
+        "cpus": 1,
+        "ntasks": 12,
+        "memory": "120000"
+    },
+     "frame_analysis_1":
+    {
+        "time": "00:40:00",
+        "cpus": 1,
+        "memory": "20000"
+    },
+     "frame_analysis_2":
+    {
+        "time": "00:40:00",
+        "cpus": 12,
+        "memory": "30000"
+    },
+     "frame_analysis_3":
+    {
+        "time": "00:30:00",
+        "cpus": 1,
+        "memory": "20000"
+    }
+}

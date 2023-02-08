@@ -1,0 +1,8 @@
+name: cruzdb
+channels:
+    - auto
+    - anaconda
+dependencies:
+    - cruzdb
+    - mysql-python
+    - pandas

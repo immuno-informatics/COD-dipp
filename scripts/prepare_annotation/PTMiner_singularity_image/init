@@ -1,0 +1,34 @@
+#!/bin/bash
+
+TEMPDIR="$(mktemp --tmpdir=$HOME -d)"
+echo "Creating and changing into temporary directory $TEMPDIR..."
+cd "$TEMPDIR"
+
+APPDIR="/APPS"
+
+echo "Setting up wine prefix..."
+export WINEPREFIX="$TEMPDIR/wineprefix"
+export WINEARCH="win64"
+
+if [[ -f "$APPDIR/wineprefix.tgz" ]]; then
+	rm -rf "$APPDIR/wineprefix.tgz"
+fi
+
+wineboot --init
+winetricks -q dotnet40 && winetricks -q vcrun2013
+
+echo "Containerizing apps directory..."
+if [[ -L "$WINEPREFIX/drive_c/Apps" ]]; then
+    echo "Link exists already"
+else
+    ln -sf "$APPDIR" "$WINEPREFIX/drive_c/Apps"
+    echo "Link created"
+fi
+
+wineboot --end-session
+
+echo "Saving last wineprefix..."
+cd $WINEPREFIX && tar czf "$APPDIR/wineprefix.tgz" . && sync
+
+cd /
+rm -rf "$TEMPDIR"

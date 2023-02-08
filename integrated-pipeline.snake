@@ -1,0 +1,646 @@
+"""
+    Pipeline for an integrated proteogenomics analysis using
+    MS-GF+, MSFragger, DeepNovoV2
+
+    Author: Georges BEDRAN, Javier Alfaro
+
+    Data Organization by experiment
+
+    ipip
+      │
+      ├sample1
+      ├── denovo
+      │   ├── fraction1.mgf
+      │   └── fraction2.mgf
+      ├── fraction1.mzML
+      └── fraction2.mzML
+      sample2
+      ├── denovo
+      │   ├── fraction1.mgf
+      │   └── fraction2.mgf
+      ├── fraction1.mzML
+      └── fraction2.mzML
+
+"""
+import os
+from glob import glob
+
+FILES = glob_wildcards("{file}.mzML")
+FILES_mgf = glob_wildcards("denovo/{file}.mgf")
+
+localrules: all
+
+rule all:
+    input: 
+           "reports/denovo_data_prep.tsv",
+           expand("frs_msgfplus/{file}.mzid", file=FILES.file),
+           expand("msfragger_{file}.pepXML", file=FILES.file),
+           "reports/frs_msgfplus/scavager_peptides.tsv", 
+           "reports/frs_msgfplus/scavager_PSMs_full.tsv",
+           "reports/frs_msgfplus/scavager_PSMs.tsv",
+           "reports/PTMiner_msfragger/PTMs_annotation.tsv",
+           "reports/denovo_annotation/3ft_coords_annotation_3m_framecheck.tsv",
+           "reports/denovo_annotation/TIS_analysis.pdf"
+
+rule frs_msfragger:
+    input: 
+        mzML = ancient("{file}.mzML")
+    output: "msfragger_{file}.pepXML"
+    conda: 'envs/msgf_plus.yml'
+    shell:
+        """ 
+         
+            # to continue even with non-zero exits
+            set +e
+
+            sed -re 's|database_name.*|database_name = ../{config[database]}|' ../{config[msfragger_conf]} > {wildcards.file}_{config[msfragger_conf]}
+            sed -i -re 's/num_threads.*/num_threads = 0/' {wildcards.file}_{config[msfragger_conf]}
+
+            # to continue even if the command failed
+            # the overall goal is to continue the pipeline even with the failure of some fractions
+            set +o pipefail;java -jar -Xmx{config[msfragger_memory]}M {config[msfragger]} \\
+                    {wildcards.file}_{config[msfragger_conf]} \\
+                    {input.mzML} || true
+
+            set +o pipefail;mv {wildcards.file}.pepXML msfragger_{wildcards.file}.pepXML || true
+            set +o pipefail;rm {wildcards.file}_{config[msfragger_conf]} || true
+
+            # if one of the above commands failed generated an empty output file
+            # since snakemake will stop the execution of the pipeline in the case of missing files 
+            if [ ! -f {output[0]} ]
+            then
+                touch {output[0]}
+            fi
+        """
+
+rule frs_msgfplus:
+    input:
+        mzML = ancient("{file}.mzML")
+    output: "frs_msgfplus/{file}.mzid"
+    conda: 'envs/msgf_plus.yml'
+    params: database = config["database"].rsplit(".", 1)[0]
+    shell:
+        """
+        mkdir -p frs_msgfplus
+        cp ../{config[database]} frs_msgfplus/{wildcards.file}_{config[database]}
+
+        # with conda
+        msgf_plus -Xmx{config[ms_gf_memory]}M -s {input.mzML} \\
+                -o {output} \\
+                -d frs_msgfplus/{wildcards.file}_{config[database]} \\
+                -conf ../{config[ms_gf_conf]}
+
+        rm -rf frs_msgfplus/{wildcards.file}_{params.database}.*
+        """
+
+rule PTMiner_msfragger:
+    input : expand("msfragger_{file}.pepXML", file=FILES.file)
+    output: "reports/PTMiner_msfragger/PTMs_annotation.tsv",
+            "reports/PTMiner_msfragger/PSMs_prior_probability.tsv", 
+            "reports/PTMiner_msfragger/PSMs_localization.tsv",
+            "reports/PTMiner_msfragger/PSMs_filtered.tsv"
+    conda: "envs/python.yml"
+    shell:
+        """
+            ml plgrid/tools/singularity/stable
+
+            mkdir -p PTMiner
+            cd PTMiner
+
+            script1="../../scripts/PTMiner/1_msfragger_input_prep.py"
+            script2="../../scripts/PTMiner/3_PTMiner_output_prep.py"
+            PTMiner_container={config[PTMiner_singularity]}
+            database={config[database]}
+
+            # cleaning previous analysis if it is the case
+            rm -rf *___numerical___*
+
+            # preparing the data
+            ln ../msfragger*.pepXML ./
+            ln ../*.mgf ./
+            ln ../../$database ./
+
+            if [ "$(ls *.pepXML 2> /dev/null | wc -l)" -eq "0" ]
+            then
+                echo "no PEPXML files found"
+                exit
+            fi
+
+            # incase MSfragger didn't report an MGF file 
+            # use mgf files for denovo
+            if [ ! "$(ls *.pepXML | wc -l)" -eq "$(ls *.mgf 2> /dev/null | wc -l)" ]
+            then
+                for file in $(ls ../../denovo/*.mgf| grep -v spectrums.mgf)
+                do
+                    basename=$(basename $file)
+                    if [ $(ls *.mgf 2> /dev/null|grep $(echo $basename|sed -e 's/\.mgf$//') | wc -l) -eq 0 ]
+                    then
+                        cp $file ./
+                        sed -i -re "s/  File.+//" ./$(basename $file)
+                    fi
+                done
+            fi
+
+            # preprocessing MSFragger results
+            # replaces protein accessions with numerical accessions (otherwise PTMiner hangs)
+            # generates PTMiner param file
+            python $script1 \\
+                -pepXML *.pepXML \\
+                -fasta $database \\
+                -decoytag rev_ \\
+                -output_dir $PWD \\
+                -mgf *.mgf
+
+            set +o pipefail;singularity exec -B $PWD:/data,$SCRATCH $PTMiner_container /PTMiner /data/pram.parameters || true
+
+            # post processing PTMiner output to restore protein accessions
+            python $script2 \\
+                -fasta $database \\
+                -db_headers db_headers___numerical___.pkl \\
+                -spectra spectra.pkl \\
+                -filtered filtered_result.txt \\
+                -loc loc_result.txt \\
+                -anno anno_result.txt \\
+                -output_dir $PWD \\
+                -suffix _processed
+
+            # cleaning
+            mkdir -p ../reports/PTMiner_msfragger
+            ln anno_result_processed.tsv ../reports/PTMiner_msfragger/PTMs_annotation.tsv
+            ln prior_probability.txt ../reports/PTMiner_msfragger/PSMs_prior_probability.tsv
+            ln loc_result_processed.tsv ../reports/PTMiner_msfragger/PSMs_localization.tsv
+            ln filtered_result_processed.tsv ../reports/PTMiner_msfragger/PSMs_filtered.tsv
+        """
+
+rule scavager_msgfplus:
+    input : expand("frs_msgfplus/{file}.mzid", file=FILES.file)
+    output: 
+            "reports/frs_msgfplus/scavager_peptides.tsv", 
+            "reports/frs_msgfplus/scavager_PSMs_full.tsv",
+            "reports/frs_msgfplus/scavager_PSMs.tsv"
+    conda: 'envs/scavager.yml'
+    shell:
+        """
+            set +e
+
+            mkdir -p reports/frs_msgfplus
+            cd reports/frs_msgfplus
+
+            mzid_files=($(find ../../frs_msgfplus -maxdepth 1 -size +0 -iname "*.mzid"))
+            for mzid_file in ${{mzid_files[@]}}
+            do
+                base_name=$(basename $mzid_file .mzid)
+                echo "launching scavager on $mzid_file"
+                set +o pipefail;scavager $mzid_file --prefix rev_ --output ./ --enzyme "[ARNDCQEGHILKMFPSTWYVXU]|{{}}" -fdr 5 || true
+                echo "post processing scavager's output" 
+                for tsv_file in "$base_name"_PSMs.tsv
+                do
+                    python ../../../scripts/Scavager_tools/post_processing.py \\
+                        -input_mzml ../../"$base_name".mzML \\
+                        -input_tsv $tsv_file \\
+                        -output_tsv $tsv_file
+                done
+                echo "post processing complete for '$base_name'_PSMs.tsv"
+            done
+              
+            echo "Concatenating all the PSM tsv files"
+
+            python ../../../scripts/Scavager_tools/concat.py
+
+            echo "Concatenation done"
+
+            # TODO: add a script to concatenate all fractions
+            # pandas script example: 
+            # list_of_dataframes = []
+            # for file in files:
+            #     list_of_dataframes.append(pd.read_csv...)
+            # concatenated = pd.concat(list_of_dataframes)
+
+            cd ../..
+
+            if [ ! -f {output[0]} ]
+            then
+                touch {output[0]}
+                touch {output[1]}
+                touch {output[2]}
+            fi
+
+        """
+
+
+rule denovo:
+    input:
+        ancient(expand("denovo/{file_}.mgf", file_=FILES_mgf.file)),
+        psm = "reports/frs_msgfplus/scavager_PSMs.tsv"
+    output: 
+        predicted = "denovo/export.csv.mass_corrected.unidentified.deepnovo_denovo",
+        accuracy = "denovo/export.csv.mass_corrected.identified.test.nodup.deepnovo_denovo.accuracy"
+    conda:
+        "envs/DeepNovoV2.yml"
+    shell:
+        """
+            set +e
+
+            if [ "$(cat {input.psm}|wc -l)" -lt "500" ]
+            then
+                echo "number of identified peptides is not enough for training"
+                echo "exiting"
+                touch {output.predicted}
+                touch {output.accuracy}
+                exit 0
+            fi
+
+            if [ ! -d "denovo/DeepNovoV2" ]
+            then
+                cp -lr ../scripts/DeepNovoV2 ./denovo
+                rm -rf ./denovo/DeepNovoV2/deepnovo_config.py
+                cp ../scripts/DeepNovoV2/deepnovo_config.py ./denovo/DeepNovoV2
+            else
+                rm -rf ./denovo/DeepNovoV2/deepnovo_config.py
+                cp ../scripts/DeepNovoV2/deepnovo_config.py ./denovo/DeepNovoV2
+            fi
+
+            set +o pipefail;python denovo/DeepNovoV2/data_prep_ipip.py ./denovo {input.psm} scavager msgfplus || true
+
+            cd denovo/DeepNovoV2
+            mkdir -p train
+
+            set +o pipefail;make build || true
+
+            set +o pipefail;make train || true
+            set +o pipefail;mv DeepNovo.log ../train_DeepNovo.log || true
+
+
+            # testing the accuracy of the model 
+
+            set +o pipefail;make denovo || true
+            set +o pipefail;make test || true
+            set +o pipefail;mv DeepNovo.log ../test_DeepNovo.log || true
+
+            # switching to prediction mode
+            sed -i -re 's|^denovo_input_feature_file.+$|denovo_input_feature_file = "../export.csv.mass_corrected.unidentified"|' deepnovo_config.py
+            set +o pipefail;make denovo || true
+            set +o pipefail;mv DeepNovo.log ../prediction_DeepNovo.log || true
+
+            cd ../..
+
+            if [ ! -f {output.predicted} ]
+            then
+                touch {output.predicted}
+                touch {output.accuracy}
+                echo "denovo failed"
+            fi
+
+            # cd ..
+            # rm -rf DeepNovoV2
+        """
+
+rule data_exploration:
+    input: accuracy = rules.denovo.output.accuracy,
+            predicted = rules.denovo.output.predicted
+    output: "reports/denovo_data_prep.tsv"
+    conda: "envs/python.yml"
+    params: accuracy = lambda wildcards, input: input.accuracy.rsplit('/', 1)[1],
+            predicted = lambda wildcards, input: input.predicted.rsplit('/', 1)[1]
+    shell:
+        """
+            set +e
+            cd denovo
+
+            set +o pipefail;python3 ../../scripts/denovo/1_dataprep_denovo.py {params.predicted} {params.accuracy} || true
+            set +o pipefail;mv denovo_data_prep.tsv ../reports || true
+            set +o pipefail;mv aa_LC_95pTP.pdf ../reports || true
+            set +o pipefail;mv aa_LC.pdf ../reports || true
+
+            cd ..
+            if [ ! -f {output[0]} ]
+            then
+                touch {output[0]}
+            fi
+
+        """
+
+rule denovo_annotation:
+    input: rules.scavager_msgfplus.output[0],
+           rules.data_exploration.output
+    output: "reports/denovo_annotation/denovo_exon_spectra.tsv",
+            "reports/denovo_annotation/denovo_nonexons_spectra_3m.tsv",
+            "reports/denovo_annotation/denovo_nonexons_spectra_4m.tsv",
+            "reports/denovo_annotation/3ft_coords_3m.tsv",
+            "reports/denovo_annotation/3ft_coords_4m.tsv",
+            "reports/denovo_annotation/3ft_coords_annotation_3m.tsv",
+            "reports/denovo_annotation/3ft_coords_annotation_4m.tsv",
+            "reports/denovo_annotation/denovo_genomic_features.pdf",
+            "reports/denovo_annotation/stats_3mismatches.pdf",
+            "reports/denovo_annotation/stats_4mismatches.pdf"
+    conda: "envs/denovo_annotation.yml"
+    shell:
+        """
+            # blat, python3, pandas, biopython, samtools, pybedtools, mpi4py
+
+            fasta_generation="../../../scripts/denovo/2_blat/fasta_generator.py"
+            pslx_filter_script="../../../scripts/denovo/2_blat/pslxFilter_mpi.py"
+            exonstat_script="../../../scripts/denovo/2_blat/exonstat_generator_mpi.py"
+            pslxFilter_againstexons_script="../../../scripts/denovo/2_blat/pslxFilter_againstexons_mpi.py"
+            fasta_filter_script="../../../scripts/denovo/2_blat/fasta_interative_filter.py"
+
+            pslx2tsv_script="../../../scripts/denovo/2_blat/pslx2tsv.py"
+            stat_plotting_script="../../../scripts/denovo/2_blat/stat_plotting.py"
+            blat_filter_script="../../../scripts/denovo/2_blat/post_filtering.py"
+            mapping_script="../../../scripts/denovo/3_mapping/denovo_mapping.py"
+            mapping_plotting_script="../../../scripts/denovo/3_mapping/features_plotting.py"
+
+            database="../../../{config[database]}"
+            threeFTgenes_db="{config[threeFTgenes_db]}"
+            annotation_file="{config[genes_annotation]}"
+
+            dn_fasta1="denovo.fasta"
+            dn_fasta2="denovo_3ft_entries.fasta"
+            dn_fasta3="denovo_mapped_3ft_entries.fasta"
+
+            out_cs="closedsearch_humandb.pslx"
+            filter_out_cs=$(basename $out_cs .pslx)_filter.pslx
+
+            out_dn_1="denovo_humandb.pslx"
+            filter_out_dn_1=$(basename $out_dn_1 .pslx)_filter.pslx
+
+            out_dn_2="denovo_3ft.pslx"
+            filter_out_dn_2=$(basename $out_dn_2 .pslx)_filter.pslx
+
+            out_dn_3="denovo_3ftVSexon.pslx"
+            filter_out_dn_3=$(basename $out_dn_3 .pslx)_filter4m.pslx
+
+            filter_out_dn_4=$(basename $out_dn_3 .pslx)_filter3m.pslx
+
+            out_exon_stats="exonstats.pkl"
+
+            output_dn_exons_4m="denovo_exon_spectra_4m.tsv"
+            output_dn_nonexons_4m="denovo_nonexons_spectra_4m.tsv"
+
+            output_dn_exons_3m="denovo_exon_spectra_3m.tsv"
+            output_dn_nonexons_3m="denovo_nonexons_spectra_3m.tsv"
+
+            ntasks=$(echo $SLURM_TASKS_PER_NODE)
+
+            # disable mpi warning message
+            OMPI_MCA_shmem_mmap_enable_nfs_warning=0
+            export OMPI_MCA_shmem_mmap_enable_nfs_warning
+
+            rm -rf denovo/denovo_annotation
+            mkdir -p denovo/denovo_annotation
+            cd denovo/denovo_annotation
+
+            mkdir -p denovo_input1
+            mkdir -p cs_input
+
+            cs_fasta="cs_input/closed_search.fasta"
+            python $fasta_generation \\
+                -input_closed_search ../../{input[0]} \\
+                -input_denovo ../../{input[1]} \\
+                -nsplits $ntasks \\
+                -output_closed_search $cs_fasta \\
+                -output_denovo denovo_input1/denovo.fasta
+
+            echo "launching blat to map the closed search peptides against the exon database"
+            samtools faidx $cs_fasta
+            samtools faidx $database
+            blat $database $cs_fasta -prot -tileSize=7 -oneOff=1 -stepSize=1 -noHead -minScore=0 -minIdentity=70 -out=pslx $out_cs
+            mpirun -n 2 python $pslx_filter_script -NmisMatch 0 -input_fasta $cs_fasta -input_pslx $out_cs -output_pslx $filter_out_cs
+
+            cat denovo_input1/* > $dn_fasta1
+            samtools faidx $dn_fasta1
+
+            echo "launching blat to map the denovo peptides against the exon database"
+            blat $database $dn_fasta1 -prot -tileSize=7 -oneOff=1 -stepSize=1 -noHead -minScore=0 -minIdentity=70 -out=pslx $out_dn_1
+            mpirun -n 2 python $pslx_filter_script -NmisMatch 1 -input_fasta $dn_fasta1 -input_pslx $out_dn_1 -output_pslx $filter_out_dn_1
+
+            mkdir -p denovo_input2
+            echo "generating dn_fasta2 containing only denovo peptides not mapping to the exons"
+            python $fasta_filter_script \\
+                -filter_type exclude \\
+                -pslx $filter_out_dn_1 \\
+                -db_file $dn_fasta1 \\
+                -output denovo_input2/denovo.fasta \\
+                -nsplits $ntasks
+
+            echo "launching blat to map the denovo peptides (dn_fasta2) against the 3ft genes database"
+            for file in denovo_input2/*
+            do
+                samtools faidx $file
+                out="denovo_input2/"$(basename $file .fasta)".pslx"
+                blat $threeFTgenes_db $file -prot -tileSize=7 -oneOff=1 -stepSize=1 -noHead -minScore=0 -minIdentity=70 -out=pslx $out &
+            done
+
+            wait
+
+            mpirun -n $ntasks python $pslx_filter_script -NmisMatch 1 -input_fasta $dn_fasta1 -input_pslx denovo_input2/*.pslx -output_pslx $filter_out_dn_2
+
+            cat denovo_input2/*.fasta > denovo2.fasta
+            dn_fasta2="denovo2.fasta"
+            mkdir -p denovo_input3
+
+            echo "generating dn_fasta3 containing only denovo peptides mapping to 3ft with max 1 mismatch"
+            python $fasta_filter_script \\
+                -filter_type include \\
+                -pslx $filter_out_dn_2 \\
+                -db_file $dn_fasta2 \\
+                -output denovo_input3/denovo.fasta \\
+                -nsplits $ntasks
+
+            for file in denovo_input3/*
+            do
+                samtools faidx $file
+                out="denovo_input3/"$(basename $file .fasta)".pslx"
+                # launch blat for the 3ft peptides in dn_fasta3 against exons with a -oneOff=4 to allow at least 4 mismatches
+                blat $database $file -prot -tileSize=6 -oneOff=2 -stepSize=1 -noHead -minScore=0 -minIdentity=0 -out=pslx $out &
+            done
+
+            wait
+
+            echo "generating exonic stats pickle dict"
+            mpirun -n $ntasks python $exonstat_script -input_fasta $dn_fasta1 -input_exon_pslx denovo_input3/*.pslx -exonstats_output $out_exon_stats
+
+            echo "keeping denovo peptide that map to 3ft with max 1 mismatch and at least 4 mismatches against the exon database"
+            mpirun -n 2 python $pslxFilter_againstexons_script \\
+                -input_fasta $dn_fasta1  \\
+                -input_pslx $filter_out_dn_2 \\
+                -output_pslx $filter_out_dn_3 \\
+                -NmisMatch 1 \\
+                -NmisMatch_diff 4 \\
+                -exonstats_input $out_exon_stats
+
+            echo "keeping denovo peptide that map to 3ft with max 1 mismatch and at least 3 mismatches against the exon database"
+            mpirun -n 2 python $pslxFilter_againstexons_script \\
+                -input_fasta $dn_fasta1  \\
+                -input_pslx $filter_out_dn_2 \\
+                -output_pslx $filter_out_dn_4 \\
+                -NmisMatch 1 \\
+                -NmisMatch_diff 3 \\
+                -exonstats_input $out_exon_stats
+
+            # 4 mismatches
+            echo "generating 4 mismatches 3FT exonic and non exonic TSV files"
+            python $pslx2tsv_script \\
+              -input_fasta $dn_fasta1 \\
+              -input_denovoexons $filter_out_dn_1\\
+              -input_denovo_nonexons $filter_out_dn_3 \\
+              -input_denovo90ALC ../../reports/denovo_data_prep.tsv \\
+              -output_denovoexons $output_dn_exons_4m \\
+              -output_denovo_nonexons $output_dn_nonexons_4m
+
+            echo "generating 3 mismatches 3FT exonic and non exonic TSV files"
+            python $pslx2tsv_script \\
+              -input_fasta $dn_fasta1 \\
+              -input_denovoexons $filter_out_dn_1\\
+              -input_denovo_nonexons $filter_out_dn_4 \\
+              -input_denovo90ALC ../../reports/denovo_data_prep.tsv \\
+              -output_denovoexons $output_dn_exons_3m \\
+              -output_denovo_nonexons $output_dn_nonexons_3m
+
+            echo "plotting BLAT result stats"
+            python $stat_plotting_script \\
+              -input_exonstat $out_exon_stats \\
+              -input_denovoexons $output_dn_exons_4m \\
+              -input_denovo_nonexons $output_dn_nonexons_4m \\
+              -output_pdf stats_4mismatches.pdf
+
+            python $stat_plotting_script \\
+              -input_exonstat $out_exon_stats \\
+              -input_denovoexons $output_dn_exons_3m \\
+              -input_denovo_nonexons $output_dn_nonexons_3m \\
+              -output_pdf stats_3mismatches.pdf
+
+            input_dn_exons_4m="denovo_exon_spectra_4m.tsv"
+            input_dn_nonexons_4m="denovo_nonexons_spectra_4m.tsv"
+            output_dn_exons_4m="denovo_exon_spectra_4m_filtered.tsv"
+            output_dn_nonexons_4m="denovo_nonexons_spectra_4m_filtered.tsv"
+
+            input_dn_exons_3m="denovo_exon_spectra_3m.tsv"
+            input_dn_nonexons_3m="denovo_nonexons_spectra_3m.tsv"
+            output_dn_exons_3m="denovo_exon_spectra_3m_filtered.tsv"
+            output_dn_nonexons_3m="denovo_nonexons_spectra_3m_filtered.tsv"
+
+            echo "Filtering spectra with less than 3 unique amino acids"
+            python $blat_filter_script \\
+              -input_tsv $input_dn_exons_4m \\
+              -output_tsv $output_dn_exons_4m\\
+              -nunique_filter 3
+
+            python $blat_filter_script \\
+              -input_tsv $input_dn_nonexons_4m \\
+              -output_tsv $output_dn_nonexons_4m\\
+              -nunique_filter 3
+
+            python $blat_filter_script \\
+              -input_tsv $input_dn_exons_3m \\
+              -output_tsv $output_dn_exons_3m\\
+              -nunique_filter 3
+
+            python $blat_filter_script \\
+              -input_tsv $input_dn_nonexons_3m \\
+              -output_tsv $output_dn_nonexons_3m \\
+              -nunique_filter 3
+
+            # conda env create -f cruzdb.yaml
+            # conda env create -f pybedtools.yaml
+
+            # to generate the annotation
+            # conda activate cruzdb
+            # python ../scripts/mapping/generate_annotation.py
+            # conda deactivate
+
+            # 3ft genes 4 mismatch pathes
+            # conda activate pybedtools
+            output_coords_4m="3ft_coords_4m.tsv"
+            output_coords_ann_4m="3ft_coords_annotation_4m.tsv"
+
+            echo "retrieving the mapping genomic coordinates from the database (4 mismatches)"
+            python $mapping_script \\
+                -input_tsv $output_dn_nonexons_4m \\
+                -input_annotation $annotation_file \\
+                -input_fasta $threeFTgenes_db \\
+                -output_coordinates $output_coords_4m \\
+                -output_coordinates_annotation $output_coords_ann_4m 
+
+            # 3ft genes 3 mismatch pathes
+            output_coords_3m="3ft_coords_3m.tsv"
+            output_coords_ann_3m="3ft_coords_annotation_3m.tsv"
+
+            echo "retrieving the mapping genomic coordinates from the database (3 mismatches)"
+            python $mapping_script \\
+                -input_tsv $output_dn_nonexons_3m \\
+                -input_annotation $annotation_file \\
+                -input_fasta $threeFTgenes_db \\
+                -output_coordinates $output_coords_3m \\
+                -output_coordinates_annotation $output_coords_ann_3m
+
+            echo "generating genomic features plot"
+            python $mapping_plotting_script \\
+                -input_coordinates_annotation $output_coords_ann_3m $output_coords_ann_4m \\
+                -output_pdf denovo_genomic_features.pdf
+
+            cd ../..
+            mkdir -p reports/denovo_annotation
+            ln denovo/denovo_annotation/denovo_exon_spectra_3m_filtered.tsv reports/denovo_annotation/denovo_exon_spectra.tsv
+            ln denovo/denovo_annotation/denovo_nonexons_spectra_3m_filtered.tsv reports/denovo_annotation/denovo_nonexons_spectra_3m.tsv
+            ln denovo/denovo_annotation/denovo_nonexons_spectra_4m_filtered.tsv reports/denovo_annotation/denovo_nonexons_spectra_4m.tsv
+            ln denovo/denovo_annotation/3ft_coords_3m.tsv reports/denovo_annotation
+            ln denovo/denovo_annotation/3ft_coords_4m.tsv reports/denovo_annotation
+            ln denovo/denovo_annotation/3ft_coords_annotation_3m.tsv reports/denovo_annotation
+            ln denovo/denovo_annotation/3ft_coords_annotation_4m.tsv reports/denovo_annotation
+            ln denovo/denovo_annotation/denovo_genomic_features.pdf reports/denovo_annotation
+            ln denovo/denovo_annotation/stats_3mismatches.pdf reports/denovo_annotation
+            ln denovo/denovo_annotation/stats_4mismatches.pdf reports/denovo_annotation
+        """
+
+rule frame_analysis_1:
+    input: "reports/denovo_annotation/3ft_coords_annotation_3m.tsv"
+    output: "reports/denovo_annotation/TITER/titer_input.txt",
+            "reports/denovo_annotation/TITER/df_titer_pos.tsv",
+            "reports/denovo_annotation/TITER/df_titer_neg.tsv",
+            "reports/denovo_annotation/TITER/3ft_coords_annotation_3m_inframe.tsv",
+    conda: "envs/denovo_annotation.yml"
+    shell:
+        """
+            outdir="reports/denovo_annotation/TITER"
+            mkdir -p $outdir
+            python ../scripts/denovo/4_TITER/1_check_inframe_introns.py \\
+                -input_denovo {input[0]} \\
+                -input_genome {config[genome]} \\
+                -input_gene_frames {config[gene_frames]} \\
+                -output_dir $outdir
+        """
+
+rule frame_analysis_2:
+    input: rules.frame_analysis_1.output[0]
+    output: "reports/denovo_annotation/TITER/output_titer.txt"
+    conda: "envs/TITER.yml"
+    shell:
+        """
+            python ../scripts/denovo/4_TITER/2_TITER.py \\
+                -input_prediction {input[0]} \\
+                -input_model_dir {config[TITER_model]} \\
+                -output {output[0]}
+        """
+
+rule frame_analysis_3:
+    input: rules.frame_analysis_2.output[0],
+           rules.frame_analysis_1.output[1],
+           rules.frame_analysis_1.output[2],
+           rules.frame_analysis_1.output[3]
+    output: "reports/denovo_annotation/3ft_coords_annotation_3m_framecheck.tsv",
+            "reports/denovo_annotation/TIS_analysis.pdf"
+    conda: "envs/denovo_annotation.yml"
+    shell:
+        """
+            python ../scripts/denovo/4_TITER/3_post_processing.py \\
+                -input_titer {input[0]} \\
+                -input_pos {input[1]} \\
+                -input_neg {input[2]} \\
+                -output {output[0]}
+
+            python ../scripts/denovo/4_TITER/4_plotting.py \\
+                -input_titer_prediction {output[0]} \\
+                -input_frames {input[3]} \\
+                -output {output[1]}
+        """

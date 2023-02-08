@@ -1,0 +1,19 @@
+# PATH to update: START
+# substitute "PATH/TO" by the actual path
+threeFTgenes_db: "PATH/TO/ipip_resources/3FTgenes_coding.fasta"
+genes_annotation: "PATH/TO/ipip_resources/UCSC_knownGene_hg38_features.tsv"
+genome: "PATH/TO/ipip_resources/hg38.fa"
+gene_frames: "PATH/TO/ipip_resources/df_features_inframes.tsv"
+TITER_model: "PATH/TO/ipip_resources/TITER"
+PTMiner_singularity: "PATH/TO/ipip_resources/PTMiner.simg"
+# install MSFragger2.2. from http://msfragger-upgrader.nesvilab.org/upgrader/
+msfragger: 'PATH/TO/MSFragger-2.2/MSFragger-2.2.jar'
+# PATH to update: END
+
+# SEARCH ENGINE params
+database: "database.fasta"
+ms_gf_conf: "MSGFPlus_Params.txt"
+ms_gf_memory: 30000
+ms_gf_srs_memory: 115000
+msfragger_conf: 'Fragger_Params.txt'
+msfragger_memory: 115000

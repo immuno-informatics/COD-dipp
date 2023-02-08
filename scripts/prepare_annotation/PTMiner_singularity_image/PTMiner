@@ -1,0 +1,25 @@
+#!/bin/bash
+APPDIR="/APPS"
+TEMPDIR="$(mktemp --tmpdir=$HOME -d)"
+echo "Creating and changing into temporary directory $TEMPDIR..."
+
+echo "Setting up wine prefix..."
+export WINEPREFIX="$TEMPDIR/wineprefix"
+export WINEARCH="win64"
+
+if [[ -f "$APPDIR/wineprefix.tgz" ]]; then
+    echo "Found existing wineprefix - restoring it..."
+    mkdir -p "$WINEPREFIX"
+    cd "$WINEPREFIX"
+    tar xzf "$APPDIR/wineprefix.tgz"
+else
+    echo "Please run /init script first"
+    exit 0
+fi
+
+cd /APPS
+
+env WINEPREFIX="$WINEPREFIX" WINEARCH="$WINEARCH" wine ./Localization.exe $1
+
+cd /
+rm -rf "$TEMPDIR"

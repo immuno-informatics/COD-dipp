@@ -1,0 +1,17 @@
+name: scavager_combined
+channels:
+    - default
+    - conda
+dependencies:
+    - numpy
+    - scipy
+    - pandas
+    - lxml
+    - catboost
+    - scikit-learn
+    - matplotlib
+    - biopython=1.73
+    - pyteomics=3.5.1
+    - pip
+    - pip:
+        - ./Scavager-0.1.9_combined

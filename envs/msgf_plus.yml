@@ -1,0 +1,10 @@
+name: msgf_plus
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - msgf_plus=2019.04.18
+  - python=3.7.3
+  - pandas=0.24.2 
+

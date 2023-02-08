@@ -1,0 +1,12 @@
+name: database
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+  - r
+dependencies:
+  - bioconductor-annotationhub
+  - bioconductor-biostrings
+  - r-base
+  - bioconductor-ensembldb
+  - bioconductor-rtracklayer

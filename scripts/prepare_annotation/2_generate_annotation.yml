@@ -1,0 +1,7 @@
+name: generate_annotation
+channels:
+    - auto
+    - anaconda
+dependencies:
+    - pandas>=1.0
+    - python>=3.0

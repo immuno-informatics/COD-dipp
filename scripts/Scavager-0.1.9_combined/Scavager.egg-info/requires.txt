@@ -1,0 +1,8 @@
+numpy
+scipy
+pandas
+pyteomics>=3.5
+lxml
+catboost
+scikit-learn
+matplotlib

@@ -1,0 +1,7 @@
+restart-times: 3
+jobscript: "slurm-jobscript.sh"
+cluster: "slurm-submit.py -A {cluster.account} --mem {cluster.memory} -J {cluster.name} -t {cluster.time} -c {cluster.cpus} -n {cluster.ntasks} -d '{dependencies}' --partition {cluster.partition} --gres '{cluster.gres}' --nodes {cluster.nodes}"
+cluster-status: "slurm-status.py"
+max-jobs-per-second: 20
+max-status-checks-per-second: 10
+local-cores: 4
